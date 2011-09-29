@@ -2,11 +2,19 @@ import datetime
 from dateutil.parser import parse
 from decimal import Decimal
 import re
-from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
-from django.utils import datetime_safe, importlib
 from piecrust.bundle import Bundle
 from piecrust.exceptions import ApiFieldError, NotFound
 from piecrust.utils import dict_strip_unicode_keys
+try:
+    import importlib
+except ImportError:
+    from piecrust.utils import importlib
+# Hate me all you want. ``datetime_safe`` is better than not having dates
+# before 1970.
+try:
+    from django.utils import datetime_safe
+except ImportError:
+    datetime_safe = datetime
 
 
 class NOT_PROVIDED:
@@ -522,7 +530,7 @@ class RelatedField(ApiField):
             obj = fk_resource.get_via_uri(uri, request=request)
             bundle = fk_resource.build_bundle(obj=obj, request=request)
             return fk_resource.full_dehydrate(bundle)
-        except ObjectDoesNotExist:
+        except NotFound:
             raise ApiFieldError("Could not find the provided object via resource URI '%s'." % uri)
 
     def resource_from_data(self, fk_resource, data, request=None, related_obj=None, related_name=None):
@@ -557,7 +565,8 @@ class RelatedField(ApiField):
                 return fk_resource.obj_update(fk_bundle, **lookup_kwargs)
             except NotFound:
                 return fk_resource.full_hydrate(fk_bundle)
-        except MultipleObjectsReturned:
+        except:
+            # Something else unexpected happened. Just build a fresh one.
             return fk_resource.full_hydrate(fk_bundle)
 
     def resource_from_pk(self, fk_resource, obj, request=None, related_obj=None, related_name=None):
@@ -619,7 +628,7 @@ class ToOneField(RelatedField):
     def dehydrate(self, bundle):
         try:
             foreign_obj = getattr(bundle.obj, self.attribute)
-        except ObjectDoesNotExist:
+        except:
             foreign_obj = None
 
         if not foreign_obj:

@@ -3,6 +3,14 @@ class PiecrustError(Exception):
     pass
 
 
+class Unauthorized(PiecrustError):
+    """
+    Used by the authentication classes to indicate when the credentials are
+    invalid.
+    """
+    pass
+
+
 class ImproperlyConfigured(PiecrustError):
     """Something isn't setup right. You should fix that."""
     pass
