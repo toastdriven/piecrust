@@ -1,25 +1,21 @@
 from copy import deepcopy
 import logging
-import warnings
-import django
-from django.conf import settings
-from django.conf.urls.defaults import patterns, url
-from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned, ValidationError
-from django.core.urlresolvers import NoReverseMatch, reverse, resolve, Resolver404, get_script_prefix
-from django.db import transaction
-from django.db.models.sql.constants import QUERY_TERMS, LOOKUP_SEP
-from django.http import HttpResponse, HttpResponseNotFound
-from django.utils.cache import patch_cache_control
+# from django.conf import settings
+# from django.conf.urls.defaults import patterns, url
+# from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned, ValidationError
+# from django.core.urlresolvers import NoReverseMatch, reverse, resolve, Resolver404, get_script_prefix
+# from django.http import HttpResponse, HttpResponseNotFound
+# from django.utils.cache import patch_cache_control
 from piecrust.authentication import Authentication
 from piecrust.authorization import ReadOnlyAuthorization
 from piecrust.bundle import Bundle
 from piecrust.cache import NoCache
-from piecrust.constants import ALL, ALL_WITH_RELATIONS
-from piecrust.exceptions import NotFound, BadRequest, InvalidFilterError, HydrationError, InvalidSortError, ImmediateHttpResponse
+from piecrust.exceptions import NotFound, BadRequest, HydrationError, ImmediateHttpResponse
 from piecrust import fields
 from piecrust import http
 from piecrust.paginator import Paginator
 from piecrust.serializers import Serializer
+from piecrust.storage import BaseStorage
 from piecrust.throttle import BaseThrottle
 from piecrust.utils import is_valid_jsonp_callback_value, dict_strip_unicode_keys, trailing_slash
 from piecrust.utils.mime import determine_format, build_content_type
@@ -39,6 +35,7 @@ class ResourceOptions(object):
     Provides sane defaults and the logic needed to augment these settings with
     the internal ``class Meta`` used on ``Resource`` subclasses.
     """
+    storage = BaseStorage()
     serializer = Serializer()
     authentication = Authentication()
     authorization = ReadOnlyAuthorization()
@@ -49,7 +46,7 @@ class ResourceOptions(object):
     allowed_methods = ['get', 'post', 'put', 'delete', 'patch']
     list_allowed_methods = None
     detail_allowed_methods = None
-    limit = getattr(settings, 'API_LIMIT_PER_PAGE', 20)
+    limit = 20
     api_name = None
     resource_name = None
     urlconf_namespace = None
@@ -177,7 +174,6 @@ class Resource(object):
                 callback = getattr(self, view)
                 response = callback(request, *args, **kwargs)
 
-
                 if request.is_ajax():
                     # IE excessively caches XMLHttpRequests, so we're disabling
                     # the browser cache here.
@@ -185,28 +181,39 @@ class Resource(object):
                     patch_cache_control(response, no_cache=True)
 
                 return response
-            except (BadRequest, fields.ApiFieldError), e:
-                return http.HttpBadRequest(e.args[0])
-            except ValidationError, e:
-                return http.HttpBadRequest(', '.join(e.messages))
+            except (BadRequest, fields.ApiFieldError, ValidationError), e:
+                return self.bad_request(request, e)
             except Exception, e:
-                if hasattr(e, 'response'):
-                    return e.response
-
-                # A real, non-expected exception.
-                # Handle the case where the full traceback is more helpful
-                # than the serialized error.
-                if settings.DEBUG and getattr(settings, 'TASTYPIE_FULL_DEBUG', False):
-                    raise
-
-                # Rather than re-raising, we're going to things similar to
-                # what Django does. The difference is returning a serialized
-                # error message.
-                return self._handle_500(request, e)
+                return self.handle_500(request, e)
 
         return wrapper
 
-    def _handle_500(self, request, exception):
+    def bad_request(self, request, exception):
+        data = {
+            "error_message": unicode(exception),
+        }
+
+        if self._meta.include_traceback:
+            data["traceback"] = the_trace
+
+        try:
+            return self.create_response(request, data, response_class=http.HttpBadRequest)
+        except:
+            return http.HttpBadRequest()
+
+    def handle_500(self, request, exception):
+        if hasattr(e, 'response'):
+            return e.response
+
+        # A real, non-expected exception.
+        # Handle the case where the full traceback is more helpful
+        # than the serialized error.
+        if settings.DEBUG and getattr(settings, 'TASTYPIE_FULL_DEBUG', False):
+            raise
+
+        # Rather than re-raising, we're going to things similar to
+        # what Django does. The difference is returning a serialized
+        # error message.
         import traceback
         import sys
         the_trace = '\n'.join(traceback.format_exception(*(sys.exc_info())))
@@ -220,9 +227,7 @@ class Resource(object):
                 "error_message": unicode(exception),
                 "traceback": the_trace,
             }
-            desired_format = self.determine_format(request)
-            serialized = self.serialize(request, data, desired_format)
-            return response_class(content=serialized, content_type=build_content_type(desired_format))
+            return self.create_response(request, data, response_class=response_class)
 
         # When DEBUG is False, send an error message to the admins (unless it's
         # a 404, in which case we check the setting).
@@ -245,9 +250,7 @@ class Resource(object):
         data = {
             "error_message": getattr(settings, 'TASTYPIE_CANNED_ERROR', "Sorry, this request could not be processed. Please try again later."),
         }
-        desired_format = self.determine_format(request)
-        serialized = self.serialize(request, data, desired_format)
-        return response_class(content=serialized, content_type=build_content_type(desired_format))
+        return self.create_response(request, data, response_class=response_class)
 
     def _build_reverse_url(self, name, args=None, kwargs=None):
         """
@@ -290,6 +293,16 @@ class Resource(object):
             *urls
         )
         return urlpatterns
+
+    def create_response(self, request, data, response_class=HttpResponse, **response_kwargs):
+        """
+        Extracts the common "which-format/serialize/return-response" cycle.
+
+        Mostly a useful shortcut/hook.
+        """
+        desired_format = self.determine_format(request)
+        serialized = self.serialize(request, data, desired_format)
+        return response_class(content=serialized, content_type=build_content_type(desired_format), **response_kwargs)
 
     def determine_format(self, request):
         """
@@ -953,16 +966,6 @@ class Resource(object):
         ``Models``.
         """
         raise NotImplementedError()
-
-    def create_response(self, request, data, response_class=HttpResponse, **response_kwargs):
-        """
-        Extracts the common "which-format/serialize/return-response" cycle.
-
-        Mostly a useful shortcut/hook.
-        """
-        desired_format = self.determine_format(request)
-        serialized = self.serialize(request, data, desired_format)
-        return response_class(content=serialized, content_type=build_content_type(desired_format), **response_kwargs)
 
     def is_valid(self, bundle, request=None):
         """
