@@ -222,33 +222,9 @@ class Resource(object):
         if isinstance(exception, (NotFound, ObjectDoesNotExist)):
             response_class = HttpResponseNotFound
 
-        if settings.DEBUG:
-            data = {
-                "error_message": unicode(exception),
-                "traceback": the_trace,
-            }
-            return self.create_response(request, data, response_class=response_class)
-
-        # When DEBUG is False, send an error message to the admins (unless it's
-        # a 404, in which case we check the setting).
-        if not isinstance(exception, (NotFound, ObjectDoesNotExist)):
-            log = logging.getLogger('django.request.tastypie')
-            log.error('Internal Server Error: %s' % request.path, exc_info=sys.exc_info(), extra={'status_code': 500, 'request':request})
-
-            if django.VERSION < (1, 3, 0) and getattr(settings, 'SEND_BROKEN_LINK_EMAILS', False):
-                from django.core.mail import mail_admins
-                subject = 'Error (%s IP): %s' % ((request.META.get('REMOTE_ADDR') in settings.INTERNAL_IPS and 'internal' or 'EXTERNAL'), request.path)
-                try:
-                    request_repr = repr(request)
-                except:
-                    request_repr = "Request repr() unavailable"
-
-                message = "%s\n\n%s" % (the_trace, request_repr)
-                mail_admins(subject, message, fail_silently=True)
-
-        # Prep the data going out.
         data = {
-            "error_message": getattr(settings, 'TASTYPIE_CANNED_ERROR', "Sorry, this request could not be processed. Please try again later."),
+            "error_message": unicode(exception),
+            "traceback": the_trace,
         }
         return self.create_response(request, data, response_class=response_class)
 
@@ -422,7 +398,7 @@ class Resource(object):
         self.throttle_check(request)
 
         # All clear. Process the request.
-        request = convert_post_to_put(request)
+        request = self.convert_post_to_put(request)
         response = method(request, **kwargs)
 
         # Add the throttled request.
@@ -1002,6 +978,36 @@ class Resource(object):
         """
         raise NotImplementedError()
 
+    def convert_post_to_VERB(self, request, verb):
+        """
+        Force Django to process the VERB.
+        """
+        # Based off of ``piston.utils.coerce_put_post``. Similarly BSD-licensed.
+        # And no, the irony is not lost on me.
+        if request.method == verb:
+            if hasattr(request, '_post'):
+                del(request._post)
+                del(request._files)
+
+            try:
+                request.method = "POST"
+                request._load_post_and_files()
+                request.method = verb
+            except AttributeError:
+                request.META['REQUEST_METHOD'] = 'POST'
+                request._load_post_and_files()
+                request.META['REQUEST_METHOD'] = verb
+
+            setattr(request, verb, request.POST)
+
+        return request
+
+    def convert_post_to_put(self, request):
+        return self.convert_post_to_VERB(request, verb='PUT')
+
+    def convert_post_to_patch(self, request):
+        return self.convert_post_to_VERB(request, verb='PATCH')
+
     # Views.
 
     def get_list(self, request, **kwargs):
@@ -1240,7 +1246,7 @@ class Resource(object):
             * ``PATCH`` is all or nothing. If a single sub-operation fails, the
               entire request will fail and all resources will be rolled back.
         """
-        request = convert_post_to_patch(request)
+        request = self.convert_post_to_patch(request)
         deserialized = self.deserialize(request, request.raw_post_data, format=request.META.get('CONTENT_TYPE', 'application/json'))
 
         if "objects" not in deserialized:
@@ -1297,7 +1303,7 @@ class Resource(object):
         If the resource is updated, return ``HttpAccepted`` (202 Accepted).
         If the resource did not exist, return ``HttpNotFound`` (404 Not Found).
         """
-        request = convert_post_to_patch(request)
+        request = self.convert_post_to_patch(request)
 
         # We want to be able to validate the update, but we can't just pass
         # the partial data into the validator since all data needs to be
@@ -1386,36 +1392,3 @@ class Resource(object):
 
         self.log_throttled_access(request)
         return self.create_response(request, object_list)
-
-
-# Based off of ``piston.utils.coerce_put_post``. Similarly BSD-licensed.
-# And no, the irony is not lost on me.
-def convert_post_to_VERB(request, verb):
-    """
-    Force Django to process the VERB.
-    """
-    if request.method == verb:
-        if hasattr(request, '_post'):
-            del(request._post)
-            del(request._files)
-
-        try:
-            request.method = "POST"
-            request._load_post_and_files()
-            request.method = verb
-        except AttributeError:
-            request.META['REQUEST_METHOD'] = 'POST'
-            request._load_post_and_files()
-            request.META['REQUEST_METHOD'] = verb
-
-        setattr(request, verb, request.POST)
-
-    return request
-
-
-def convert_post_to_put(request):
-    return convert_post_to_VERB(request, verb='PUT')
-
-
-def convert_post_to_patch(request):
-    return convert_post_to_VERB(request, verb='PATCH')
