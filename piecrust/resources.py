@@ -1,22 +1,19 @@
 from copy import deepcopy
-import logging
-# from django.conf import settings
 # from django.conf.urls.defaults import patterns, url
-# from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned, ValidationError
 # from django.core.urlresolvers import NoReverseMatch, reverse, resolve, Resolver404, get_script_prefix
 # from django.http import HttpResponse, HttpResponseNotFound
-# from django.utils.cache import patch_cache_control
 from piecrust.authentication import Authentication
 from piecrust.authorization import ReadOnlyAuthorization
 from piecrust.bundle import Bundle
 from piecrust.cache import NoCache
-from piecrust.exceptions import NotFound, BadRequest, HydrationError, ImmediateHttpResponse
+from piecrust.exceptions import NotFound, BadRequest, HydrationError, ImmediateHttpResponse, ObjectDoesNotExist, MultipleObjectsReturned, ValidationError
 from piecrust import fields
 from piecrust import http
 from piecrust.paginator import Paginator
 from piecrust.serializers import Serializer
 from piecrust.storage import BaseStorage
 from piecrust.throttle import BaseThrottle
+from piecrust.uris import UriHandler
 from piecrust.utils import is_valid_jsonp_callback_value, dict_strip_unicode_keys, trailing_slash
 from piecrust.utils.mime import determine_format, build_content_type
 from piecrust.validation import Validation
@@ -26,6 +23,13 @@ try:
 except ImportError:
     def csrf_exempt(func):
         return func
+try:
+    from django.utils.cache import patch_cache_control
+except ImportError:
+    def patch_cache_control(*args, **kwargs):
+        # TODO: This hurts in the case of IE. The only choice is to copy-paste
+        #       from Django or ignore. For now, ignore.
+        pass
 
 
 class ResourceOptions(object):
@@ -43,6 +47,7 @@ class ResourceOptions(object):
     throttle = BaseThrottle()
     validation = Validation()
     paginator_class = Paginator
+    uri_handler = UriHandler()
     allowed_methods = ['get', 'post', 'put', 'delete', 'patch']
     list_allowed_methods = None
     detail_allowed_methods = None
@@ -194,6 +199,9 @@ class Resource(object):
         }
 
         if self._meta.include_traceback:
+            import traceback
+            import sys
+            the_trace = '\n'.join(traceback.format_exception(*(sys.exc_info())))
             data["traceback"] = the_trace
 
         try:
@@ -202,13 +210,13 @@ class Resource(object):
             return http.HttpBadRequest()
 
     def handle_500(self, request, exception):
-        if hasattr(e, 'response'):
-            return e.response
+        if hasattr(exception, 'response'):
+            return exception.response
 
         # A real, non-expected exception.
         # Handle the case where the full traceback is more helpful
         # than the serialized error.
-        if settings.DEBUG and getattr(settings, 'TASTYPIE_FULL_DEBUG', False):
+        if getattr(self._meta, 'debug', False):
             raise
 
         # Rather than re-raising, we're going to things similar to
@@ -220,7 +228,7 @@ class Resource(object):
         response_class = http.HttpApplicationError
 
         if isinstance(exception, (NotFound, ObjectDoesNotExist)):
-            response_class = HttpResponseNotFound
+            response_class = http.HttpNotFound
 
         data = {
             "error_message": unicode(exception),

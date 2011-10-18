@@ -11,11 +11,6 @@ class Unauthorized(PiecrustError):
     pass
 
 
-class ImproperlyConfigured(PiecrustError):
-    """Something isn't setup right. You should fix that."""
-    pass
-
-
 class HydrationError(PiecrustError):
     """Raised when there is an error hydrating data."""
     pass
@@ -92,3 +87,33 @@ class ImmediateHttpResponse(PiecrustError):
     """
     def __init__(self, response):
         self.response = response
+
+
+try:
+    from django.core.exceptions import ImproperlyConfigured
+except ImportError:
+    class ImproperlyConfigured(PiecrustError):
+        """Something isn't setup right. You should fix that."""
+        pass
+
+try:
+    from django.core.exceptions import ObjectDoesNotExist
+except ImportError:
+    class ObjectDoesNotExist(PiecrustError):
+        """No such object matches what you were trying to load."""
+        pass
+
+try:
+    from django.core.exceptions import MultipleObjectsReturned
+except ImportError:
+    class MultipleObjectsReturned(PiecrustError):
+        """Too many objects match what you were trying to load."""
+        pass
+
+
+try:
+    from django.core.exceptions import ValidationError
+except ImportError:
+    class ValidationError(PiecrustError):
+        """Wrong data."""
+        pass
